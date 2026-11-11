@@ -1,0 +1,269 @@
+import { Request, Response } from 'express';
+import { getInfo } from './info.controller';
+
+jest.mock('../../config/assets', () => {
+  const mockAssets = [
+    {
+      code: 'USDC',
+      issuer: 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN',
+      type: 'credit_alphanum4',
+      desc: 'USD Coin',
+      minAmount: '0.01',
+      maxAmount: '100000',
+      feeType: 'flat',
+      feeFixed: 0.1,
+      feePercent: 0.001,
+      feeMinimum: 0.01,
+      depositEnabled: true,
+      withdrawEnabled: true
+    },
+    {
+      code: 'XLM',
+      type: 'native',
+      desc: 'Stellar Lumens',
+      minAmount: '1',
+      maxAmount: '1000000',
+      feeType: 'percentage',
+      feeFixed: 0,
+      feePercent: 0,
+      feeMinimum: 0,
+      depositEnabled: true,
+      withdrawEnabled: false
+    }
+  ];
+  return {
+    ASSETS: mockAssets,
+    getIssuer: (code: string) => mockAssets.find(a => a.code === code)?.issuer,
+  };
+});
+
+describe('Info Controller', () => {
+  let mockRequest: Partial<Request>;
+  let mockResponse: Partial<Response>;
+  let jsonMock: jest.Mock;
+  let sendMock: jest.Mock;
+  let setHeaderMock: jest.Mock;
+
+  beforeEach(() => {
+    jsonMock = jest.fn().mockReturnValue(mockResponse);
+    sendMock = jest.fn().mockReturnValue(mockResponse);
+    setHeaderMock = jest.fn().mockReturnValue(mockResponse);
+
+    mockRequest = {
+      query: {},
+      headers: {}
+    };
+
+    mockResponse = {
+      json: jsonMock,
+      send: sendMock,
+      setHeader: setHeaderMock
+    } as any;
+
+    jest.clearAllMocks();
+    process.env.STELLAR_NETWORK = 'testnet';
+    process.env.BASE_URL = 'http://localhost:3002';
+    process.env.SIGNING_KEY = 'GBBD47IF6LWLVNC7F7YSACOA73YI4COI3V5O2S46F7S44GUL44YQY4O2';
+  });
+
+  describe('getInfo - JSON format', () => {
+    it('should return info in JSON format by default', async () => {
+      mockRequest.query = {};
+      mockRequest.headers = {};
+
+      await getInfo(mockRequest as Request, mockResponse as Response);
+
+      expect(jsonMock).toHaveBeenCalled();
+      const response = jsonMock.mock.calls[0][0];
+      expect(response).toHaveProperty('version');
+      expect(response).toHaveProperty('network', 'testnet');
+      expect(response).toHaveProperty('assets');
+    });
+
+    it('should return JSON when Accept header includes application/json', async () => {
+      mockRequest.query = {};
+      mockRequest.headers = { accept: 'application/json' };
+
+      await getInfo(mockRequest as Request, mockResponse as Response);
+
+      expect(jsonMock).toHaveBeenCalled();
+    });
+
+    it('should include all assets in the response', async () => {
+      await getInfo(mockRequest as Request, mockResponse as Response);
+
+      const response = jsonMock.mock.calls[0][0];
+      expect(response.assets).toHaveLength(2);
+      expect(response.assets[0].code).toBe('USDC');
+      expect(response.assets[1].code).toBe('XLM');
+    });
+
+    it('should include asset details with correct properties', async () => {
+      await getInfo(mockRequest as Request, mockResponse as Response);
+
+      const response = jsonMock.mock.calls[0][0];
+      const usdcAsset = response.assets.find((a: any) => a.code === 'USDC');
+      expect(usdcAsset).toHaveProperty('issuer');
+      expect(usdcAsset).toHaveProperty('status', 'live');
+      expect(usdcAsset).toHaveProperty('is_asset_anchored', true);
+      expect(usdcAsset).toHaveProperty('desc', 'USD Coin');
+      expect(usdcAsset).toHaveProperty('max_amount', '100000');
+      expect(usdcAsset).toHaveProperty('min_amount', '0.01');
+      expect(usdcAsset).toHaveProperty('fee_fixed', 0.1);
+      expect(usdcAsset).toHaveProperty('fee_percent', 0.001);
+    });
+
+    it('should include fee variations for deposit and withdraw', async () => {
+      await getInfo(mockRequest as Request, mockResponse as Response);
+
+      const response = jsonMock.mock.calls[0][0];
+      expect(response).toHaveProperty('fee_variations');
+      expect(response.fee_variations).toHaveProperty('deposit');
+      expect(response.fee_variations).toHaveProperty('withdraw');
+    });
+
+    it('should include only assets that support deposit in fee_variations.deposit', async () => {
+      await getInfo(mockRequest as Request, mockResponse as Response);
+
+      const response = jsonMock.mock.calls[0][0];
+      expect(response.fee_variations.deposit).toHaveProperty('USDC');
+      expect(response.fee_variations.deposit).toHaveProperty('XLM');
+    });
+
+    it('should include only assets that support withdraw in fee_variations.withdraw', async () => {
+      await getInfo(mockRequest as Request, mockResponse as Response);
+
+      const response = jsonMock.mock.calls[0][0];
+      expect(response.fee_variations.withdraw).toHaveProperty('USDC');
+      expect(response.fee_variations.withdraw).not.toHaveProperty('XLM');
+    });
+
+    it('should include accounts information', async () => {
+      await getInfo(mockRequest as Request, mockResponse as Response);
+
+      const response = jsonMock.mock.calls[0][0];
+      expect(response.accounts).toHaveProperty('receiving');
+    });
+
+    it('should use environment variables for server URLs', async () => {
+      process.env.AUTH_SERVER = 'https://auth.example.com';
+      process.env.TRANSFER_SERVER = 'https://transfer.example.com';
+
+      await getInfo(mockRequest as Request, mockResponse as Response);
+
+      const response = jsonMock.mock.calls[0][0];
+      expect(response.auth_server).toBe('https://auth.example.com');
+      expect(response.transfer_server).toBe('https://transfer.example.com');
+    });
+  });
+
+  describe('getInfo - TOML format', () => {
+    it('should return TOML when format=toml query parameter is set', async () => {
+      mockRequest.query = { format: 'toml' };
+
+      await getInfo(mockRequest as Request, mockResponse as Response);
+
+      expect(setHeaderMock).toHaveBeenCalledWith('Content-Type', 'text/toml');
+      expect(sendMock).toHaveBeenCalled();
+    });
+
+    it('should return TOML for GET /.well-known/stellar.toml', async () => {
+      mockRequest = {
+        query: {},
+        headers: {},
+        path: '/.well-known/stellar.toml',
+        originalUrl: '/.well-known/stellar.toml',
+        url: '/.well-known/stellar.toml',
+      };
+
+      await getInfo(mockRequest as Request, mockResponse as Response);
+
+      expect(setHeaderMock).toHaveBeenCalledWith('Content-Type', 'text/toml');
+      expect(sendMock).toHaveBeenCalled();
+    });
+
+    it('should return TOML when Accept header includes text/toml', async () => {
+      mockRequest.headers = { accept: 'text/toml' };
+
+      await getInfo(mockRequest as Request, mockResponse as Response);
+
+      expect(setHeaderMock).toHaveBeenCalledWith('Content-Type', 'text/toml');
+      expect(sendMock).toHaveBeenCalled();
+    });
+
+    it('should include required fields in TOML output', async () => {
+      mockRequest.query = { format: 'toml' };
+
+      await getInfo(mockRequest as Request, mockResponse as Response);
+
+      const tomlOutput = sendMock.mock.calls[0][0];
+      expect(tomlOutput).toContain('version =');
+      expect(tomlOutput).toContain('network = "testnet"');
+      expect(tomlOutput).toContain('signing_key =');
+      expect(tomlOutput).toContain('horizon_url =');
+      expect(tomlOutput).toContain('url = "http://localhost:3002"');
+    });
+
+    it('should include accounts section in TOML output', async () => {
+      mockRequest.query = { format: 'toml' };
+
+      await getInfo(mockRequest as Request, mockResponse as Response);
+
+      const tomlOutput = sendMock.mock.calls[0][0];
+      expect(tomlOutput).toContain('[accounts]');
+      expect(tomlOutput).toContain('receiving =');
+    });
+
+    it('should include assets section in TOML output', async () => {
+      mockRequest.query = { format: 'toml' };
+
+      await getInfo(mockRequest as Request, mockResponse as Response);
+
+      const tomlOutput = sendMock.mock.calls[0][0];
+      expect(tomlOutput).toContain('[[assets]]');
+      expect(tomlOutput).toContain('code = "USDC"');
+      expect(tomlOutput).toContain('code = "XLM"');
+    });
+
+    it('should include fee variations section in TOML output', async () => {
+      mockRequest.query = { format: 'toml' };
+
+      await getInfo(mockRequest as Request, mockResponse as Response);
+
+      const tomlOutput = sendMock.mock.calls[0][0];
+      expect(tomlOutput).toContain('[fee_variations.deposit]');
+      expect(tomlOutput).toContain('[fee_variations.withdraw]');
+    });
+  });
+
+  describe('getInfo - environment variables', () => {
+    it('should use default values when environment variables are not set', async () => {
+      delete process.env.AUTH_SERVER;
+      delete process.env.FEDERATION_SERVER;
+
+      await getInfo(mockRequest as Request, mockResponse as Response);
+
+      const response = jsonMock.mock.calls[0][0];
+      expect(response.horizon_url).toBeDefined();
+      expect(response.signing_key).toBeDefined();
+    });
+
+    it('should filter out undefined optional fields', async () => {
+      delete process.env.FEDERATION_SERVER;
+
+      await getInfo(mockRequest as Request, mockResponse as Response);
+
+      const response = jsonMock.mock.calls[0][0];
+      expect(response.federation_server).toBeUndefined();
+    });
+
+    it('should use TRANSFER_SERVER_SEP24 environment variable or construct default', async () => {
+      process.env.TRANSFER_SERVER_SEP24 = 'https://sep24.example.com';
+
+      await getInfo(mockRequest as Request, mockResponse as Response);
+
+      const response = jsonMock.mock.calls[0][0];
+      expect(response.transfer_server_sep24).toBe('https://sep24.example.com');
+    });
+  });
+});

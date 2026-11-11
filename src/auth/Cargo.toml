@@ -1,0 +1,18 @@
+[package]
+name = "anchorpoint-auth"
+version = "0.1.0"
+edition = "2021"
+description = "Universal modular RBAC for Soroban contracts"
+
+[dependencies]
+soroban-sdk = "26.0.1"
+anchorpoint-utils = { path = "../utils" }
+
+[lib]
+name = "anchorpoint_auth"
+path = "rbac.rs"
+crate-type = ["cdylib", "rlib"]
+doctest = false
+
+[dev-dependencies]
+soroban-sdk = { version = "26.0.1", features = ["testutils"] }

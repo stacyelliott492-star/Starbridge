@@ -1,0 +1,482 @@
+import { Request, Response } from 'express';
+import { RedisService } from '../../services/redis.service';
+import {
+  generateChallenge,
+  generateMultiKeyChallenge,
+  storeChallenge,
+  getChallenge as getChallengeFromRedis,
+  removeChallenge,
+  signToken,
+  verifyToken,
+  issueTokenPair,
+  rotateRefreshToken,
+  RefreshTokenReuseError,
+  ACCESS_TOKEN_TTL_SECONDS,
+  REFRESH_TOKEN_TTL_SECONDS,
+  validateMultiKeySignatures,
+  SignerInfo,
+  SignatureInfo,
+  MultiKeyChallenge,
+  MultiKeyVerifiedToken,
+  generateSep10ChallengeTransaction,
+  storeSep10Challenge,
+  verifySep10ChallengeTransaction
+} from '../../services/auth.service';
+import {
+  extractAccountFromSep10Transaction
+} from '../../utils/sep10-stellar';
+import { config } from '../../config/env';
+import { NetworkType } from '../../config/networks';
+import logger from '../../utils/logger';
+
+// RFC 1123 compliant hostname: no consecutive dots/hyphens, labels must start/end with alphanumeric
+const CLIENT_DOMAIN_REGEX = /^(?!-)[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.(?!-)[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*\.(?!-)(?:[a-zA-Z]{2,}|xn--[a-zA-Z0-9]+)(?:-[a-zA-Z0-9]+)*$/;
+const SEP10_NONCE_TTL_SECONDS = 300;
+
+type Sep10NonceRecord = {
+  account: string;
+  createdAt: number;
+};
+
+const buildSep10NonceKey = (nonce: string) => `sep10:nonce:${nonce}`;
+
+function validateClientDomain(domain: string): boolean {
+  const trimmed = domain.trim();
+  if (!trimmed) return false;
+  if (/^https?:\/\//i.test(trimmed)) return false;
+  if (/^javascript:/i.test(trimmed)) return false;
+  if (/\s/.test(trimmed)) return false;
+  return CLIENT_DOMAIN_REGEX.test(trimmed);
+}
+
+interface ChallengeRequest {
+  account: string;
+  client_domain?: string;
+  signers?: SignerInfo[];
+  threshold?: 'low' | 'medium' | 'high';
+  multiKey?: boolean;
+}
+
+interface ChallengeResponse {
+  transaction: string;
+  network_passphrase: string;
+  multiKeyChallenge?: MultiKeyChallenge;
+}
+
+interface TokenRequest {
+  transaction: string;
+  signatures?: SignatureInfo[];
+  threshold?: 'low' | 'medium' | 'high';
+}
+
+interface TokenResponse {
+  token: string;
+  access_token?: string;
+  refresh_token?: string;
+  type: 'bearer';
+  expires_in: number;
+  refresh_expires_in?: number;
+  authLevel?: 'partial' | 'medium' | 'full';
+  signers?: string[];
+}
+
+/**
+ * POST /auth
+ * SEP-10 Challenge Endpoint
+ * Generates and stores a challenge for the given account
+ */
+function readStringParam(bodyValue: unknown, queryValue: unknown): string | undefined {
+  if (typeof bodyValue === 'string') {
+    return bodyValue;
+  }
+  if (typeof queryValue === 'string') {
+    return queryValue;
+  }
+  if (Array.isArray(queryValue) && typeof queryValue[0] === 'string') {
+    return queryValue[0];
+  }
+  return undefined;
+}
+
+export const getChallenge = async (
+  req: Request,
+  res: Response,
+  redisService: RedisService
+): Promise<Response> => {
+  const body = (req.body ?? {}) as ChallengeRequest;
+  const account = readStringParam(body.account, req.query?.account);
+  // Capture the raw body value before readStringParam trims empty strings so
+  // we can detect an explicitly supplied but empty/invalid client_domain.
+  const rawClientDomain = body.client_domain as unknown;
+  const client_domain = readStringParam(body.client_domain, req.query?.client_domain);
+  const { signers, threshold, multiKey } = body;
+
+  if (!account || !account.trim()) {
+    return res.status(400).json({
+      error: 'account parameter is required'
+    });
+  }
+
+  // If client_domain was explicitly provided (including as an empty string or
+  // whitespace-only value), validate it. readStringParam returns undefined for
+  // empty strings, so we check the raw value to catch that case.
+  const clientDomainSupplied =
+    client_domain !== undefined ||
+    (typeof rawClientDomain === 'string' && rawClientDomain.trim() === '');
+
+  if (clientDomainSupplied) {
+    if (!client_domain || !validateClientDomain(client_domain)) {
+      return res.status(400).json({
+        error: 'invalid_client_domain',
+        message: 'client_domain must be a valid hostname without scheme'
+      });
+    }
+  }
+
+  try {
+    // Generate a new challenge
+    const challenge = generateChallenge();
+
+    // Handle multi-key authentication
+    let multiKeyChallenge: MultiKeyChallenge | undefined;
+    if (multiKey && signers && signers.length > 0) {
+      multiKeyChallenge = generateMultiKeyChallenge(signers, threshold || 'medium');
+    }
+
+    // Store the challenge in Redis with TTL
+    await storeChallenge(redisService, account, challenge);
+
+    const anchorPublicKey = config.ANCHOR_PUBLIC_KEY || 'GBAD_PUBLIC_KEY'; // Default for demo
+    const networkType = config.STELLAR_NETWORK === 'public' ? NetworkType.PUBLIC : NetworkType.TESTNET;
+
+    // Generate a SEP-10 challenge transaction, embedding client_domain when provided
+    const sep10Challenge = generateSep10ChallengeTransaction(
+      anchorPublicKey,
+      account,
+      networkType,
+      client_domain
+    );
+
+    // Store the challenge in Redis
+    await storeSep10Challenge(redisService, account, sep10Challenge);
+    await redisService.setJSON<Sep10NonceRecord>(
+      buildSep10NonceKey(sep10Challenge.challenge),
+      { account, createdAt: Date.now() },
+      SEP10_NONCE_TTL_SECONDS
+    );
+
+    const response: ChallengeResponse = {
+      transaction: sep10Challenge.transactionXdr || sep10Challenge.challenge,
+      network_passphrase: sep10Challenge.networkPassphrase || config.STELLAR_NETWORK_PASSPHRASE || 'Test SDF Network ; September 2015',
+      multiKeyChallenge
+    };
+
+    return res.json(response);
+  } catch (error) {
+    return res.status(500).json({
+      error: 'Failed to generate challenge'
+    });
+  }
+};
+
+/**
+ * POST /auth/token
+ * SEP-10 Token Endpoint
+ * Verifies the signed challenge and returns a JWT token
+ */
+export const getToken = async (
+  req: Request,
+  res: Response,
+  redisService: RedisService
+): Promise<Response> => {
+  const { transaction, signatures, threshold }: TokenRequest = req.body;
+
+  if (!transaction) {
+    return res.status(400).json({
+      error: 'transaction parameter is required'
+    });
+  }
+
+  try {
+    // Handle multi-key authentication
+    if (signatures && signatures.length > 0) {
+      const validation = validateMultiKeySignatures(signatures, threshold || 'medium');
+
+      if (!validation.valid) {
+        return res.status(400).json({
+          error: 'Insufficient signature weight for required threshold'
+        });
+      }
+
+      // For multi-key, extract the primary account from first signature
+      const mockAccount = signatures[0].publicKey;
+      const storedChallenge = await getChallengeFromRedis(redisService, mockAccount);
+
+      if (!storedChallenge || storedChallenge.challenge !== transaction) {
+        return res.status(400).json({
+          error: 'Invalid or expired challenge'
+        });
+      }
+
+      // Remove the challenge to prevent replay attacks
+      await removeChallenge(redisService, mockAccount);
+
+      // Create multi-key verified token data
+      const multiKeyData: MultiKeyVerifiedToken = {
+        sub: mockAccount,
+        signers: validation.signers,
+        threshold: threshold || 'medium',
+        authLevel: validation.authLevel
+      };
+
+      if (typeof issueTokenPair === 'function') {
+        const tokenPair = await issueTokenPair(mockAccount, redisService, multiKeyData);
+        if (tokenPair && tokenPair.access_token && tokenPair.refresh_token) {
+          const response: TokenResponse = {
+            token: tokenPair.access_token,
+            access_token: tokenPair.access_token,
+            refresh_token: tokenPair.refresh_token,
+            type: 'bearer',
+            expires_in: tokenPair.expires_in ?? ACCESS_TOKEN_TTL_SECONDS,
+            refresh_expires_in: tokenPair.refresh_expires_in ?? REFRESH_TOKEN_TTL_SECONDS,
+            authLevel: validation.authLevel,
+            signers: validation.signers
+          };
+          return res.json(response);
+        }
+      }
+
+      // Fallback when issueTokenPair is mocked out in legacy unit tests
+      const token = signToken(mockAccount, multiKeyData);
+
+      const response: TokenResponse = {
+        token,
+        type: 'bearer',
+        expires_in: 3600, // 1 hour
+        authLevel: validation.authLevel,
+        signers: validation.signers
+      };
+
+      return res.json(response);
+    }
+
+    // Single-key authentication (existing logic)
+    const networkType = config.STELLAR_NETWORK === 'public' ? NetworkType.PUBLIC : NetworkType.TESTNET;
+
+    // Extract the account from the signed transaction
+    const account = extractAccountFromSep10Transaction(transaction, networkType);
+
+    if (!account) {
+      return res.status(400).json({
+        error: 'Invalid transaction format'
+      });
+    }
+
+    // Hardware wallet specific validation
+    try {
+      const isHardwareWallet = await validateHardwareWalletSignature(transaction);
+      if (isHardwareWallet) {
+        logger.info('Hardware wallet signature detected', { account, hardwareWallet: true });
+      }
+    } catch (error) {
+      logger.warn('Hardware wallet validation failed', {
+        account,
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
+
+    // Get the stored challenge
+    const storedChallenge = await getChallengeFromRedis(redisService, account);
+
+    if (!storedChallenge) {
+      return res.status(400).json({
+        error: 'Challenge not found or expired'
+      });
+    }
+
+    // Verify the signed transaction
+    const verification = verifySep10ChallengeTransaction(
+      transaction,
+      storedChallenge,
+      networkType
+    );
+
+    if (verification.error === 'challenge_expired') {
+      // The signature was valid but timeBounds.maxTime has passed: the
+      // challenge can never be redeemed, so drop it and reject the replay.
+      await removeChallenge(redisService, account);
+      return res.status(401).json({
+        error: 'challenge_expired'
+      });
+    }
+
+    if (!verification.isValid) {
+      return res.status(400).json({
+        error: 'Invalid signature or challenge'
+      });
+    }
+
+    const nonceKey = buildSep10NonceKey(storedChallenge.challenge);
+    const nonceRecord = await redisService.getJSON<Sep10NonceRecord>(nonceKey);
+    if (!nonceRecord || nonceRecord.account !== account) {
+      return res.status(400).json({
+        error: 'Invalid or expired nonce'
+      });
+    }
+
+    // Remove the nonce and challenge to prevent replay attacks
+    await redisService.del(nonceKey);
+    await removeChallenge(redisService, account);
+
+    if (typeof issueTokenPair === 'function') {
+      const tokenPair = await issueTokenPair(account, redisService);
+      if (tokenPair && tokenPair.access_token && tokenPair.refresh_token) {
+        const response: TokenResponse = {
+          token: tokenPair.access_token,
+          access_token: tokenPair.access_token,
+          refresh_token: tokenPair.refresh_token,
+          type: 'bearer',
+          expires_in: tokenPair.expires_in ?? ACCESS_TOKEN_TTL_SECONDS,
+          refresh_expires_in: tokenPair.refresh_expires_in ?? REFRESH_TOKEN_TTL_SECONDS,
+        };
+        return res.json(response);
+      }
+    }
+
+    // Fallback when issueTokenPair is mocked out in legacy unit tests
+    const token = signToken(account);
+
+    const response: TokenResponse = {
+      token,
+      type: 'bearer',
+      expires_in: 3600 // 1 hour
+    };
+
+    return res.json(response);
+  } catch (error) {
+    return res.status(500).json({
+      error: 'Failed to verify challenge'
+    });
+  }
+}
+
+/**
+ * POST /auth/refresh
+ * SEP-10 Token Refresh Endpoint
+ * Rotates a refresh token and returns a new access/refresh token pair
+ */
+export const refreshToken = async (
+  req: Request,
+  res: Response,
+  redisService?: RedisService
+): Promise<Response> => {
+  const bodyRefreshToken =
+    typeof req.body?.refresh_token === 'string'
+      ? req.body.refresh_token.trim()
+      : typeof req.body?.refreshToken === 'string'
+        ? req.body.refreshToken.trim()
+        : undefined;
+
+  const authHeader = req.headers?.authorization;
+  const bearerToken =
+    authHeader && authHeader.startsWith('Bearer ')
+      ? authHeader.split(' ')[1]?.trim()
+      : undefined;
+
+  const candidateRefreshToken = bodyRefreshToken || bearerToken;
+
+  if (!candidateRefreshToken) {
+    return res.status(401).json({ error: 'Missing or invalid refresh token' });
+  }
+
+  try {
+    if (typeof rotateRefreshToken === 'function') {
+      const rotated = await rotateRefreshToken(candidateRefreshToken, redisService);
+      if (rotated && rotated.access_token && rotated.refresh_token) {
+        const response: TokenResponse = {
+          token: rotated.access_token,
+          access_token: rotated.access_token,
+          refresh_token: rotated.refresh_token,
+          type: 'bearer',
+          expires_in: rotated.expires_in ?? ACCESS_TOKEN_TTL_SECONDS,
+          refresh_expires_in: rotated.refresh_expires_in ?? REFRESH_TOKEN_TTL_SECONDS,
+          authLevel: rotated.multiKeyData?.authLevel,
+          signers: rotated.multiKeyData?.signers,
+        };
+
+        return res.json(response);
+      }
+    }
+
+    // Fallback for legacy Bearer JWT refresh
+    if (bearerToken && !bodyRefreshToken) {
+      const decoded = await verifyToken(bearerToken, redisService);
+
+      let multiKeyData: MultiKeyVerifiedToken | undefined;
+      if ('signers' in decoded) {
+        multiKeyData = decoded as MultiKeyVerifiedToken;
+      }
+
+      const newToken = signToken(decoded.sub, multiKeyData);
+
+      const response: TokenResponse = {
+        token: newToken,
+        access_token: newToken,
+        type: 'bearer',
+        expires_in: ACCESS_TOKEN_TTL_SECONDS ?? 900,
+        authLevel: multiKeyData?.authLevel,
+        signers: multiKeyData?.signers
+      };
+
+      return res.json(response);
+    }
+
+    return res.status(401).json({ error: 'Invalid or expired refresh token' });
+  } catch (error) {
+    if (
+      error instanceof RefreshTokenReuseError ||
+      (error instanceof Error && error.name === 'RefreshTokenReuseError')
+    ) {
+      return res.status(401).json({
+        error: 'Refresh token reuse detected; session family invalidated',
+        code: 'REFRESH_TOKEN_REUSE'
+      });
+    }
+    return res.status(401).json({ error: 'Invalid or expired refresh token' });
+  }
+};
+
+/**
+ * Validate hardware wallet signature
+ * @param transaction Signed transaction XDR
+ * @returns Promise<boolean> Whether this is a hardware wallet signature
+ */
+async function validateHardwareWalletSignature(
+  transaction: string,
+): Promise<boolean> {
+  try {
+    const transactionObj = JSON.parse(transaction);
+
+    if (transactionObj && typeof transactionObj === 'object') {
+      const hasHardwareIndicators = (
+        transactionObj.hardwareWallet ||
+        transactionObj.trezor ||
+        transactionObj.ledger ||
+        transactionObj.signerType === 'hardware'
+      );
+
+      return hasHardwareIndicators;
+    }
+
+    return false;
+  } catch (error) {
+    try {
+      if (transaction.length > 100 && transaction.length < 2000) {
+        return true;
+      }
+      return false;
+    } catch {
+      return false;
+    }
+  }
+}

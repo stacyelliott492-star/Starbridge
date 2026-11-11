@@ -1,0 +1,204 @@
+//! Standardized Contract Event Emitter for AnchorPoint
+//!
+//! Provides a unified shape for all events emitted by AnchorPoint contracts,
+//! making it easier for off-chain indexers to process Soroban data.
+
+use soroban_sdk::{contracttype, symbol_short, Address, Bytes, Env};
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct DepositEvent {
+    pub from: Address,
+    pub amount_a: i128,
+    pub amount_b: i128,
+    pub shares: i128,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct WithdrawEvent {
+    pub from: Address,
+    pub amount_a: i128,
+    pub amount_b: i128,
+    pub shares: i128,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct SwapEvent {
+    pub from: Address,
+    pub amount_in: i128,
+    pub amount_out: i128,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProposalCreatedEvent {
+    pub id: u32,
+    pub creator: Address,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct VotedEvent {
+    pub proposal_id: u32,
+    pub voter: Address,
+    pub support: bool,
+    /// Downscaled from i128 — max safe votes fit in i64 given quadratic cost constraints.
+    pub votes: i64,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProposalExecutedEvent {
+    pub proposal_id: u32,
+    pub executor: Address,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct FundsReleasedEvent {
+    pub recipient: Address,
+    pub amount: i128,
+}
+
+/// Cross-contract event wrapper for the Event Hub
+/// Captures an event from another contract for re-emission and off-chain indexing
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct CrossContractEvent {
+    /// The contract that originated this event
+    pub source_contract: Address,
+    /// Timestamp when the event was captured (in seconds)
+    pub timestamp: u64,
+    /// Raw event data from the source contract
+    pub event_data: Bytes,
+    /// Event type identifier (e.g., "transfer", "swap", "stake")
+    pub event_type: soroban_sdk::String,
+}
+
+/// Canonical events emitted across the AnchorPoint monorepo.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum AnchorEvent {
+    Deposit(DepositEvent),
+    Withdraw(WithdrawEvent),
+    Swap(SwapEvent),
+    ProposalCreated(ProposalCreatedEvent),
+    Voted(VotedEvent),
+    ProposalExecuted(ProposalExecutedEvent),
+    FundsReleased(FundsReleasedEvent),
+    CrossContractEvent(CrossContractEvent),
+}
+
+/// A trait for standardized event emission.
+/// Contracts can implement this or use the `emit_event` free function.
+pub trait EventEmitter {
+    fn emit(&self, env: &Env, event: AnchorEvent);
+}
+
+/// Emits an AnchorPoint event using a standardized topic structure.
+///
+/// The payload is the structured `AnchorEvent` enum.
+/// The top-level topic is always `symbol_short!("anchor")` followed by the variant name,
+/// which allows indexers to filter globally for all AnchorPoint events.
+#[allow(deprecated)]
+pub fn emit_event(env: &Env, event: AnchorEvent) {
+    let sub_topic = match &event {
+        AnchorEvent::Deposit(_) => symbol_short!("deposit"),
+        AnchorEvent::Withdraw(_) => symbol_short!("withdraw"),
+        AnchorEvent::Swap(_) => symbol_short!("swap"),
+        AnchorEvent::ProposalCreated(_) => symbol_short!("prop_cre"),
+        AnchorEvent::Voted(_) => symbol_short!("voted"),
+        AnchorEvent::ProposalExecuted(_) => symbol_short!("prop_exe"),
+        AnchorEvent::FundsReleased(_) => symbol_short!("release"),
+        AnchorEvent::CrossContractEvent(_) => symbol_short!("xcontract"),
+    };
+
+    env.events()
+        .publish((symbol_short!("anchor"), sub_topic), event);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use soroban_sdk::{
+        contract, contractimpl, testutils::Address as _, testutils::Events, vec, IntoVal,
+    };
+
+    #[contract]
+    pub struct DummyContract;
+
+    #[contractimpl]
+    impl DummyContract {
+        pub fn emit_test_event(env: Env, event: AnchorEvent) {
+            emit_event(&env, event);
+        }
+    }
+
+    #[test]
+    fn test_emit_deposit() {
+        let env = Env::default();
+        let id = env.register(DummyContract, ());
+        let client = DummyContractClient::new(&env, &id);
+
+        let from = Address::generate(&env);
+        let event = AnchorEvent::Deposit(DepositEvent {
+            from: from.clone(),
+            amount_a: 100,
+            amount_b: 200,
+            shares: 50,
+        });
+
+        client.emit_test_event(&event);
+
+        assert_eq!(
+            env.events().all(),
+            vec![
+                &env,
+                (
+                    id.clone(),
+                    vec![
+                        &env,
+                        symbol_short!("anchor").into_val(&env),
+                        symbol_short!("deposit").into_val(&env),
+                    ],
+                    event.clone().into_val(&env)
+                )
+            ]
+        );
+    }
+
+    #[test]
+    fn test_emit_voted() {
+        let env = Env::default();
+        let id = env.register(DummyContract, ());
+        let client = DummyContractClient::new(&env, &id);
+
+        let voter = Address::generate(&env);
+        let event = AnchorEvent::Voted(VotedEvent {
+            proposal_id: 1,
+            voter: voter.clone(),
+            support: true,
+            votes: 25i64,
+        });
+
+        client.emit_test_event(&event);
+
+        assert_eq!(
+            env.events().all(),
+            vec![
+                &env,
+                (
+                    id.clone(),
+                    vec![
+                        &env,
+                        symbol_short!("anchor").into_val(&env),
+                        symbol_short!("voted").into_val(&env),
+                    ],
+                    event.clone().into_val(&env)
+                )
+            ]
+        );
+    }
+}

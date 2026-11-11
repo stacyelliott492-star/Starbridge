@@ -1,0 +1,134 @@
+# AnchorPoint Backend
+
+The backend service for AnchorPoint, providing API endpoints for Stellar Anchor operations as per SEPs 1, 10, 12, and 24.
+
+## Tech Stack
+- **Node.js**: Runtime environment.
+- **TypeScript**: Typed JavaScript for robustness.
+- **Express**: Fast, unopinionated, minimalist web framework.
+- **Jest & Supertest**: Testing framework and HTTP assertion library.
+- **ESLint**: Linter for identifying and reporting on patterns in JavaScript/TypeScript.
+
+## Getting Started
+
+### Prerequisites
+- Node.js (v18 or higher)
+- npm
+
+### Installation
+From the monorepo root:
+```bash
+npm run install:all
+```
+
+Or from the `/backend` directory:
+```bash
+npm install
+```
+
+### Development
+To start the development server with auto-reload:
+```bash
+npm run dev
+```
+
+### Building
+To compile TypeScript to JavaScript:
+```bash
+npm run build
+```
+
+### Testing
+To run tests:
+```bash
+npm test
+```
+
+To run tests with coverage report:
+```bash
+npm run test:coverage
+```
+
+Current coverage threshold is set to **95%** for branches, functions, lines, and statements.
+
+### Quality Control
+To run the linter:
+```bash
+npm run lint
+```
+
+### Database Restore Verification
+To verify that the SQLite backend database can be backed up and restored without mutating the source database:
+```bash
+npm run db:restore:verify
+```
+
+For the full disaster recovery procedure, see [Database Restore Disaster Recovery Runbook](./docs/DISASTER_RECOVERY_DB_RESTORE.md).
+
+### Database Connection Pooling
+Prisma's connection pool is configured through environment variables, which are appended to PostgreSQL `DATABASE_URL`s:
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `DATABASE_POOL_SIZE` | `10` | Maximum connections per process (Prisma `connection_limit`). |
+| `DATABASE_POOL_TIMEOUT_MS` | `5000` | How long a query waits to acquire a connection before failing (Prisma `pool_timeout`, rounded up to whole seconds). |
+
+Production sizing guidance:
+- Start from `DATABASE_POOL_SIZE = (num_cpus * 2) + 1` per instance and tune from observed load.
+- Keep `DATABASE_POOL_SIZE * number_of_instances` (including workers) below PostgreSQL's `max_connections`, leaving headroom for migrations and admin sessions.
+- If you need more total connections than the database allows, put PgBouncer in front of PostgreSQL rather than raising the pool size.
+- Watch `db_pool_connections_active` (Prometheus) and the `databasePool` block of `GET /health`; sustained utilization near `1.0` or pool-timeout errors mean the pool is undersized.
+
+## External KYC Providers (SEP-12)
+AnchorPoint supports pluggable third-party KYC providers for SEP-12 flows.
+
+Supported providers:
+- `mock` (default)
+- `persona`
+- `shufti`
+
+Configuration:
+- `KYC_PROVIDER=mock|persona|shufti`
+- `KYC_WEBHOOK_SECRET=<shared secret for webhook signature validation>`
+- `PERSONA_API_KEY=<persona api key>`
+- `PERSONA_API_URL=<optional, defaults to https://withpersona.com/api/v1>`
+- `SHUFTI_CLIENT_ID=<shufti client id>`
+- `SHUFTI_SECRET_KEY=<shufti secret key>`
+- `SHUFTI_API_URL=<optional, defaults to https://api.shuftipro.com>`
+
+Webhook endpoint:
+- `POST /sep12/webhook`
+
+Provider webhook updates are validated by signature and then reconciled against either provider reference or account.
+## Admin Password Reset
+AnchorPoint backend includes a secure password reset flow for admin users.
+
+Endpoints:
+- `POST /api/admin/password-reset/request`
+- `POST /api/admin/password-reset/confirm`
+
+Security behavior:
+- Email-based verification token delivery
+- Tokens are random 256-bit values and only a hashed token is stored
+- Tokens expire after `PASSWORD_RESET_TTL_MINUTES` (default: 15)
+- Tokens are single-use and outstanding tokens are invalidated on new requests
+- Request endpoint returns a non-enumerating success message even for unknown emails
+
+Optional SMTP environment variables:
+- `SMTP_HOST`
+- `SMTP_PORT`
+- `SMTP_USER`
+- `SMTP_PASS`
+- `SMTP_FROM`
+- `ADMIN_PASSWORD_RESET_URL_BASE`
+
+When SMTP is not configured, emails are logged locally for development instead of being sent.
+
+## SMTP Integration
+The backend uses a shared Nodemailer transport (`src/lib/smtp.service.ts`) for:
+- Admin password reset emails
+- User notification emails (when SMTP is configured)
+- Hot wallet low-balance alerts
+
+Configure the SMTP variables above to enable delivery in staging or production.
+When SMTP is configured, the backend also sends HTML alert emails (for example hot-wallet low-balance notifications) using the same transport. Set `ALERT_EMAIL_RECIPIENTS` to a comma-separated list of operator addresses. If SMTP is not configured, alert content is logged at `info` level for local development.
