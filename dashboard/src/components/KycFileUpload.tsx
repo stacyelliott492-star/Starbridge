@@ -6,10 +6,8 @@ import {
   AlertCircle, 
   X, 
   Eye, 
-  FileCheck, 
   ShieldCheck, 
-  Lock,
-  ArrowRight
+  Lock
 } from 'lucide-react';
 
 export const DEFAULT_MAX_SIZE_BYTES = 5 * 1024 * 1024; // 5MB

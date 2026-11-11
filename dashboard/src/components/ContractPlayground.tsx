@@ -4,14 +4,11 @@ import {
   Terminal, 
   Wallet, 
   Code, 
-  CheckCircle2, 
   AlertCircle, 
   Copy, 
   Check, 
   Cpu, 
   Layers, 
-  ExternalLink,
-  ChevronRight,
   FileCode2,
   Sparkles
 } from 'lucide-react';
@@ -272,7 +269,7 @@ export const ContractPlayground: React.FC<ContractPlaygroundProps> = ({
   const [formValues, setFormValues] = useState<Record<string, string>>({});
   const [formErrors, setFormErrors] = useState<Record<string, string>>({});
   const [isWalletConnected, setIsWalletConnected] = useState<boolean>(true);
-  const [connectedAddress, setConnectedAddress] = useState<string>(defaultWalletAddress);
+  const [connectedAddress] = useState<string>(defaultWalletAddress);
   const [isExecuting, setIsExecuting] = useState<boolean>(false);
   const [executionResult, setExecutionResult] = useState<ExecutionResult | null>(null);
   const [activeTab, setActiveTab] = useState<'params' | 'specJson'>('params');

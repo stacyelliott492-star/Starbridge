@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { 
   AlertTriangle, 
   ShieldAlert, 
@@ -1150,7 +1150,7 @@ export const OracleMonitor: React.FC<OracleMonitorProps> = ({
             </thead>
             <tbody className="divide-y divide-slate-800 text-sm">
               {priceFeeds.map((feed) => {
-                const age = computeFeedAgeSeconds(feed.timestamp);
+                const _age = computeFeedAgeSeconds(feed.timestamp);
                 const isStale = feed.status === 'stale';
                 const isFailed = feed.status === 'failed';
 

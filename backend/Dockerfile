@@ -6,14 +6,15 @@ FROM node:20-alpine AS builder
 WORKDIR /app
 
 # Copy dependency manifests first to maximise layer-cache reuse.
-# These layers are only invalidated when package*.json files change.
-COPY package.json package-lock.json ./
+# The backend is an npm workspace member with no local package-lock.json,
+# so use npm install instead of npm ci.
+COPY package.json ./
 
 # Install all dependencies including devDependencies needed for the build step.
 # --no-audit/--no-fund skip two network round-trips that produce output nobody
 # reads in a build log; --ignore-scripts keeps a dependency's install script
 # from running arbitrary code before the source is even present.
-RUN npm ci --ignore-scripts --no-audit --no-fund
+RUN npm install --ignore-scripts --no-audit --no-fund
 
 # Copy application source after dependencies to keep the install layer cached.
 COPY . .
@@ -34,14 +35,14 @@ FROM node:20-alpine AS prod-deps
 
 WORKDIR /app
 
-COPY package.json package-lock.json ./
+COPY package.json ./
 COPY prisma ./prisma
 
 # --ignore-scripts skips the root `postinstall: prisma generate`, because the
 # Prisma CLI is a devDependency and is not installed in this stage. The client
 # is therefore copied from the builder below instead of re-generating it with
 # `npx prisma`, which would download the CLI on every build.
-RUN npm ci --omit=dev --ignore-scripts --no-audit --no-fund
+RUN npm install --omit=dev --ignore-scripts --no-audit --no-fund
 
 # The generated client (schema-specific code plus the query engine binary) is
 # written to node_modules/.prisma by the builder's `prisma generate`. @prisma/

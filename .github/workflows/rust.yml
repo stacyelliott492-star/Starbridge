@@ -38,10 +38,8 @@ jobs:
           ./tools/optimize-wasm.sh target/wasm32v1-none/release
 
       - uses: taiki-e/install-action@v2
-
         with:
-          tool: cargo-scout-audit@0.3.16
-          tool: cargo-audit@0.21.0
+          tool: cargo-scout-audit@0.3.16,cargo-audit@0.21.0
 
       - name: Install Scout system dependencies
         run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config gcc

@@ -4,8 +4,7 @@ import React from 'react';
 import { 
   ContractPlayground, 
   validateArg, 
-  parseContractSpec, 
-  PRESET_CONTRACTS 
+  parseContractSpec
 } from './ContractPlayground';
 
 describe('ContractPlayground - Interactive Soroban Contract Method Caller UI', () => {
